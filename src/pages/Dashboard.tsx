@@ -5,7 +5,7 @@ import SensorChart from '@/components/dashboard/SensorChart';
 import { useSensorData } from '@/contexts/SensorContext';
 
 const Dashboard: React.FC = () => {
-  const { currentData, status, history, lastUpdate } = useSensorData();
+  const { currentData, status, history, lastUpdate, isConnected } = useSensorData();
 
   return (
     <div className="h-full p-6 flex flex-col gap-6">
@@ -13,11 +13,11 @@ const Dashboard: React.FC = () => {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-foreground">Dashboard</h1>
-          <p className="text-muted-foreground">Real-time cold storage monitoring</p>
+          <p className="text-muted-foreground">Real-time cold storage monitoring via ThingSpeak</p>
         </div>
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <div className="w-2 h-2 rounded-full bg-success animate-pulse" />
-          Live Updates
+          <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-success animate-pulse' : 'bg-destructive'}`} />
+          {isConnected ? 'Connected to ThingSpeak' : 'Disconnected'}
         </div>
       </div>
 
