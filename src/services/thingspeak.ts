@@ -1,0 +1,139 @@
+// ThingSpeak API Service for Cold Storage Monitoring
+// Channel: 3186649
+// Field 1: Temperature, Field 2: Humidity, Field 3: Gas
+
+const THINGSPEAK_CHANNEL_ID = "3186649";
+const THINGSPEAK_READ_API_KEY = "1Q662QYR5B6OC2J7";
+
+export interface ThingSpeakFeed {
+  created_at: string;
+  entry_id: number;
+  field1: string | null; // Temperature
+  field2: string | null; // Humidity
+  field3: string | null; // Gas
+}
+
+export interface ThingSpeakResponse {
+  channel: {
+    id: number;
+    name: string;
+    latitude: string;
+    longitude: string;
+    field1: string;
+    field2: string;
+    field3: string;
+    created_at: string;
+    updated_at: string;
+    last_entry_id: number;
+  };
+  feeds: ThingSpeakFeed[];
+}
+
+export interface SensorReading {
+  temperature: number;
+  humidity: number;
+  gas: number;
+  timestamp: Date;
+  entryId: number;
+}
+
+// Fetch the latest sensor reading
+export async function fetchLatestReading(): Promise<SensorReading | null> {
+  try {
+    const url = `https://api.thingspeak.com/channels/${THINGSPEAK_CHANNEL_ID}/feeds/last.json?api_key=${THINGSPEAK_READ_API_KEY}`;
+    
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      console.error("ThingSpeak API error:", response.status);
+      return null;
+    }
+    
+    const data: ThingSpeakFeed = await response.json();
+    
+    if (!data || !data.created_at) {
+      console.error("Invalid ThingSpeak response:", data);
+      return null;
+    }
+    
+    return {
+      temperature: parseFloat(data.field1 || "0"),
+      humidity: parseFloat(data.field2 || "0"),
+      gas: parseInt(data.field3 || "0", 10),
+      timestamp: new Date(data.created_at),
+      entryId: data.entry_id,
+    };
+  } catch (error) {
+    console.error("Error fetching ThingSpeak data:", error);
+    return null;
+  }
+}
+
+// Fetch historical readings (last N entries)
+export async function fetchHistoricalReadings(results: number = 100): Promise<SensorReading[]> {
+  try {
+    const url = `https://api.thingspeak.com/channels/${THINGSPEAK_CHANNEL_ID}/feeds.json?api_key=${THINGSPEAK_READ_API_KEY}&results=${results}`;
+    
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      console.error("ThingSpeak API error:", response.status);
+      return [];
+    }
+    
+    const data: ThingSpeakResponse = await response.json();
+    
+    if (!data.feeds || !Array.isArray(data.feeds)) {
+      console.error("Invalid ThingSpeak response:", data);
+      return [];
+    }
+    
+    return data.feeds.map(feed => ({
+      temperature: parseFloat(feed.field1 || "0"),
+      humidity: parseFloat(feed.field2 || "0"),
+      gas: parseInt(feed.field3 || "0", 10),
+      timestamp: new Date(feed.created_at),
+      entryId: feed.entry_id,
+    })).reverse(); // Most recent last for charts
+  } catch (error) {
+    console.error("Error fetching ThingSpeak history:", error);
+    return [];
+  }
+}
+
+// Fetch readings from a specific time range
+export async function fetchReadingsInRange(
+  startDate: Date,
+  endDate: Date
+): Promise<SensorReading[]> {
+  try {
+    const start = startDate.toISOString();
+    const end = endDate.toISOString();
+    
+    const url = `https://api.thingspeak.com/channels/${THINGSPEAK_CHANNEL_ID}/feeds.json?api_key=${THINGSPEAK_READ_API_KEY}&start=${start}&end=${end}`;
+    
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      console.error("ThingSpeak API error:", response.status);
+      return [];
+    }
+    
+    const data: ThingSpeakResponse = await response.json();
+    
+    if (!data.feeds || !Array.isArray(data.feeds)) {
+      return [];
+    }
+    
+    return data.feeds.map(feed => ({
+      temperature: parseFloat(feed.field1 || "0"),
+      humidity: parseFloat(feed.field2 || "0"),
+      gas: parseInt(feed.field3 || "0", 10),
+      timestamp: new Date(feed.created_at),
+      entryId: feed.entry_id,
+    }));
+  } catch (error) {
+    console.error("Error fetching ThingSpeak range data:", error);
+    return [];
+  }
+}

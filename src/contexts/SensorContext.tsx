@@ -1,5 +1,8 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { SensorData, SensorThresholds, SensorStatus, LogEntry, HistoryEntry } from '@/types/sensor';
+import { fetchLatestReading, fetchHistoricalReadings, SensorReading } from '@/services/thingspeak';
+import { supabase } from '@/integrations/supabase/client';
+import { toast } from 'sonner';
 
 interface SensorContextType {
   currentData: SensorData;
@@ -30,9 +33,9 @@ export const useSensorData = () => {
 
 export const SensorProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentData, setCurrentData] = useState<SensorData>({
-    temperature: 4.2,
-    humidity: 65,
-    gas: 120,
+    temperature: 0,
+    humidity: 0,
+    gas: 0,
     timestamp: new Date(),
   });
 
@@ -43,16 +46,13 @@ export const SensorProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [isConnected, setIsConnected] = useState(true);
-  const [lastUpdate, setLastUpdate] = useState<Date | null>(new Date());
+  const [isConnected, setIsConnected] = useState(false);
+  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+  const lastEntryIdRef = useRef<number>(0);
+  const emailSentRef = useRef<Set<string>>(new Set());
 
   const getStatus = useCallback((data: SensorData, thresholds: SensorThresholds): SensorStatus => {
-    const getLevel = (value: number, threshold: { warning: number; critical: number }, isGas = false): 'normal' | 'warning' | 'critical' => {
-      if (isGas) {
-        if (value >= threshold.critical) return 'critical';
-        if (value >= threshold.warning) return 'warning';
-        return 'normal';
-      }
+    const getLevel = (value: number, threshold: { warning: number; critical: number }): 'normal' | 'warning' | 'critical' => {
       if (value >= threshold.critical) return 'critical';
       if (value >= threshold.warning) return 'warning';
       return 'normal';
@@ -60,7 +60,7 @@ export const SensorProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     const tempStatus = getLevel(data.temperature, thresholds.temperature);
     const humidStatus = getLevel(data.humidity, thresholds.humidity);
-    const gasStatus = getLevel(data.gas, thresholds.gas, true);
+    const gasStatus = getLevel(data.gas, thresholds.gas);
 
     const statuses = [tempStatus, humidStatus, gasStatus];
     let overall: 'normal' | 'warning' | 'critical' = 'normal';
@@ -77,11 +77,11 @@ export const SensorProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const [status, setStatus] = useState<SensorStatus>(() => getStatus(currentData, thresholds));
 
-  const addLog = useCallback((sensor: 'temperature' | 'humidity' | 'gas', value: number, threshold: number, status: 'warning' | 'critical') => {
+  const addLog = useCallback((sensor: 'temperature' | 'humidity' | 'gas', value: number, threshold: number, logStatus: 'warning' | 'critical') => {
     const messages = {
-      temperature: `Temperature ${status === 'critical' ? 'critically high' : 'above normal'}: ${value}°C`,
-      humidity: `Humidity ${status === 'critical' ? 'critically high' : 'above normal'}: ${value}%`,
-      gas: `Gas level ${status === 'critical' ? 'critical' : 'elevated'}: ${value} PPM`,
+      temperature: `Temperature ${logStatus === 'critical' ? 'critically high' : 'above normal'}: ${value}°C`,
+      humidity: `Humidity ${logStatus === 'critical' ? 'critically high' : 'above normal'}: ${value}%`,
+      gas: `Gas level ${logStatus === 'critical' ? 'critical' : 'elevated'}: ${value} PPM`,
     };
 
     const newLog: LogEntry = {
@@ -90,76 +90,179 @@ export const SensorProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       sensor,
       value,
       threshold,
-      status,
+      status: logStatus,
       message: messages[sensor],
     };
 
     setLogs(prev => [newLog, ...prev].slice(0, 500));
   }, []);
 
-  // Simulate real-time data updates
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setCurrentData(prev => {
-        // Simulate slight variations
-        const newTemp = Math.max(0, Math.min(20, prev.temperature + (Math.random() - 0.5) * 0.5));
-        const newHumidity = Math.max(30, Math.min(100, prev.humidity + (Math.random() - 0.5) * 2));
-        const newGas = Math.max(50, Math.min(800, prev.gas + (Math.random() - 0.5) * 20));
+  const sendCriticalAlert = useCallback(async (data: SensorData, currentStatus: SensorStatus) => {
+    const criticalSensors: string[] = [];
+    
+    if (currentStatus.temperature === 'critical') criticalSensors.push('Temperature');
+    if (currentStatus.humidity === 'critical') criticalSensors.push('Humidity');
+    if (currentStatus.gas === 'critical') criticalSensors.push('Gas');
 
-        const newData = {
-          temperature: Math.round(newTemp * 10) / 10,
-          humidity: Math.round(newHumidity * 10) / 10,
-          gas: Math.round(newGas),
-          timestamp: new Date(),
+    if (criticalSensors.length === 0) return;
+
+    // Create a unique key for this alert to prevent duplicate emails
+    const alertKey = `${criticalSensors.join('-')}-${Math.floor(Date.now() / 60000)}`; // Per minute
+    
+    if (emailSentRef.current.has(alertKey)) {
+      return; // Already sent this alert
+    }
+
+    try {
+      const { data: response, error } = await supabase.functions.invoke('send-alert', {
+        body: {
+          temperature: data.temperature,
+          humidity: data.humidity,
+          gas: data.gas,
+          criticalSensors,
+        },
+      });
+
+      if (error) {
+        console.error('Failed to send alert:', error);
+      } else {
+        emailSentRef.current.add(alertKey);
+        console.log('Critical alert sent:', response);
+        toast.error(`Critical alert triggered for: ${criticalSensors.join(', ')}`);
+      }
+    } catch (error) {
+      console.error('Error sending critical alert:', error);
+    }
+  }, []);
+
+  // Fetch latest data from ThingSpeak
+  const fetchData = useCallback(async () => {
+    try {
+      const reading = await fetchLatestReading();
+      
+      if (reading && reading.entryId !== lastEntryIdRef.current) {
+        lastEntryIdRef.current = reading.entryId;
+        
+        const newData: SensorData = {
+          temperature: reading.temperature,
+          humidity: reading.humidity,
+          gas: reading.gas,
+          timestamp: reading.timestamp,
         };
 
+        setCurrentData(newData);
+        setLastUpdate(new Date());
+        setIsConnected(true);
+
         // Add to history
+        const historyEntry: HistoryEntry = {
+          id: `${reading.entryId}`,
+          timestamp: reading.timestamp,
+          temperature: reading.temperature,
+          humidity: reading.humidity,
+          gas: reading.gas,
+        };
+
         setHistory(prev => {
-          const newEntry: HistoryEntry = {
-            id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-            timestamp: new Date(),
-            temperature: newData.temperature,
-            humidity: newData.humidity,
-            gas: newData.gas,
-          };
-          return [newEntry, ...prev].slice(0, 1000);
+          const exists = prev.some(h => h.id === historyEntry.id);
+          if (exists) return prev;
+          return [historyEntry, ...prev].slice(0, 1000);
         });
 
-        // Check thresholds and add logs
+        // Calculate status
         const newStatus = getStatus(newData, thresholds);
-        
-        if (newStatus.temperature !== 'normal' && prev.temperature < thresholds.temperature.warning) {
+        setStatus(newStatus);
+
+        // Check for threshold breaches and log
+        if (newStatus.temperature !== 'normal') {
           addLog('temperature', newData.temperature, 
             newStatus.temperature === 'critical' ? thresholds.temperature.critical : thresholds.temperature.warning,
             newStatus.temperature);
         }
         
-        if (newStatus.humidity !== 'normal' && prev.humidity < thresholds.humidity.warning) {
+        if (newStatus.humidity !== 'normal') {
           addLog('humidity', newData.humidity,
             newStatus.humidity === 'critical' ? thresholds.humidity.critical : thresholds.humidity.warning,
             newStatus.humidity);
         }
         
-        if (newStatus.gas !== 'normal' && prev.gas < thresholds.gas.warning) {
+        if (newStatus.gas !== 'normal') {
           addLog('gas', newData.gas,
             newStatus.gas === 'critical' ? thresholds.gas.critical : thresholds.gas.warning,
             newStatus.gas);
         }
 
-        setStatus(newStatus);
-        setLastUpdate(new Date());
+        // Send email alert if critical
+        if (newStatus.overall === 'critical') {
+          sendCriticalAlert(newData, newStatus);
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching sensor data:', error);
+      setIsConnected(false);
+    }
+  }, [thresholds, getStatus, addLog, sendCriticalAlert]);
 
-        return newData;
-      });
-    }, 3000);
+  // Load historical data on mount
+  useEffect(() => {
+    const loadHistory = async () => {
+      const readings = await fetchHistoricalReadings(100);
+      
+      if (readings.length > 0) {
+        const historyEntries: HistoryEntry[] = readings.map(r => ({
+          id: `${r.entryId}`,
+          timestamp: r.timestamp,
+          temperature: r.temperature,
+          humidity: r.humidity,
+          gas: r.gas,
+        }));
+        
+        setHistory(historyEntries.reverse());
+        
+        // Set current data from most recent
+        const latest = readings[readings.length - 1];
+        if (latest) {
+          lastEntryIdRef.current = latest.entryId;
+          setCurrentData({
+            temperature: latest.temperature,
+            humidity: latest.humidity,
+            gas: latest.gas,
+            timestamp: latest.timestamp,
+          });
+          setLastUpdate(latest.timestamp);
+          setIsConnected(true);
+          
+          const initialStatus = getStatus({
+            temperature: latest.temperature,
+            humidity: latest.humidity,
+            gas: latest.gas,
+            timestamp: latest.timestamp,
+          }, thresholds);
+          setStatus(initialStatus);
+        }
+      }
+    };
+
+    loadHistory();
+  }, [getStatus, thresholds]);
+
+  // Poll for new data every 5 seconds
+  useEffect(() => {
+    fetchData(); // Initial fetch
+    
+    const interval = setInterval(fetchData, 5000);
 
     return () => clearInterval(interval);
-  }, [thresholds, getStatus, addLog]);
+  }, [fetchData]);
 
   const updateThresholds = useCallback((newThresholds: SensorThresholds) => {
     setThresholds(newThresholds);
     localStorage.setItem('sensorThresholds', JSON.stringify(newThresholds));
-  }, []);
+    
+    // Recalculate status with new thresholds
+    const newStatus = getStatus(currentData, newThresholds);
+    setStatus(newStatus);
+  }, [currentData, getStatus]);
 
   return (
     <SensorContext.Provider
